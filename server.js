@@ -1,4 +1,11 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  scryptSync,
+  timingSafeEqual,
+} from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +22,7 @@ const {
   DB_PASSWORD = '',
   DB_NAME = 'cold_store',
   ADMIN_PASSWORD,
+  AUTH_SECRET,
   GEMINI_API_KEY,
   GEMINI_MODEL = 'gemini-3.5-flash-lite',
 } = process.env;
@@ -157,6 +165,18 @@ async function initDatabase() {
         ADD COLUMN store_id CHAR(36) NULL,
         ADD CONSTRAINT fk_orders_store FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE SET NULL`);
   }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS staff (
+      id CHAR(36) PRIMARY KEY,
+      username VARCHAR(100) NOT NULL UNIQUE,
+      name VARCHAR(200) NOT NULL,
+      password_hash VARCHAR(300) NOT NULL,
+      store_id CHAR(36) NOT NULL,
+      FOREIGN KEY (store_id) REFERENCES stores(id) ON DELETE CASCADE
+    )`);
+  await addColumnIfMissing(pool, 'orders', 'status', "VARCHAR(20) NOT NULL DEFAULT 'new'");
+  await addColumnIfMissing(pool, 'orders', 'status_updated_at', 'DATETIME(3) NULL');
 
   // First run with stores: move the old single-warehouse stock into a default store.
   if (storesExisted === 0) {
@@ -367,6 +387,60 @@ function adminAuth(req, res, next) {
 }
 
 const pool = await initDatabase();
+
+const tokenKey = digest(`staff-token:${AUTH_SECRET || ADMIN_PASSWORD}`);
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
+const b64url = (buffer) => Buffer.from(buffer).toString('base64url');
+
+function hashPassword(password) {
+  const salt = randomBytes(16);
+  return `${salt.toString('hex')}:${scryptSync(password, salt, 64).toString('hex')}`;
+}
+
+function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':');
+  const expected = Buffer.from(hash, 'hex');
+  const actual = scryptSync(password, Buffer.from(salt, 'hex'), expected.length);
+  return timingSafeEqual(actual, expected);
+}
+
+function signToken(payload) {
+  const body = b64url(JSON.stringify({ ...payload, exp: Date.now() + TOKEN_TTL_MS }));
+  return `${body}.${b64url(createHmac('sha256', tokenKey).update(body).digest())}`;
+}
+
+function readToken(token) {
+  const [body, signature] = token.split('.');
+  if (!body || !signature) return null;
+  const expected = createHmac('sha256', tokenKey).update(body).digest();
+  const given = Buffer.from(signature, 'base64url');
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString());
+    return payload.exp > Date.now() ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+function staffAuth(req, res, next) {
+  const [scheme, token] = (req.headers.authorization ?? '').split(' ');
+  const payload = scheme === 'Bearer' && token ? readToken(token) : null;
+  if (!payload) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+  req.staff = { id: payload.sub, storeId: payload.storeId };
+  next();
+}
+
+const ORDER_STATUSES = ['new', 'preparing', 'ready', 'completed', 'cancelled'];
+const STATUS_TRANSITIONS = {
+  new: ['preparing', 'cancelled'],
+  preparing: ['ready', 'cancelled'],
+  ready: ['completed', 'cancelled'],
+  completed: [],
+  cancelled: [],
+};
 const app = express();
 app.use(express.json({ limit: '100kb' }));
 
@@ -834,6 +908,226 @@ app.post('/orders', async (req, res, next) => {
     next(error);
   } finally {
     db.release();
+  }
+});
+
+const loginAttempts = new Map();
+
+app.post('/staff/login', async (req, res, next) => {
+  const { username, password } = req.body ?? {};
+  if (typeof username !== 'string' || typeof password !== 'string' ||
+      username.length === 0 || username.length > 100 || password.length === 0 || password.length > 200) {
+    return res.status(400).json({ error: 'Username and password are required.' });
+  }
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) {
+    if (now >= entry.expires) loginAttempts.delete(ip);
+  }
+  const attempts = loginAttempts.get(req.ip);
+  if ((attempts && attempts.count >= 10) || (!attempts && loginAttempts.size >= 10000)) {
+    return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
+  }
+  if (attempts) {
+    attempts.count += 1;
+  } else {
+    loginAttempts.set(req.ip, { count: 1, expires: now + 60000 });
+  }
+  try {
+    const [rows] = await pool.query(
+      `SELECT st.id, st.name, st.password_hash, st.store_id, s.name AS store_name
+       FROM staff st JOIN stores s ON s.id = st.store_id WHERE st.username = ?`,
+      [username.trim().toLowerCase()],
+    );
+    const staff = rows[0];
+    if (!staff || !verifyPassword(password, staff.password_hash)) {
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+    res.json({
+      token: signToken({ sub: staff.id, storeId: staff.store_id }),
+      staff: {
+        id: staff.id,
+        name: staff.name,
+        storeId: staff.store_id,
+        storeName: staff.store_name,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/admin/api/staff', adminAuth, async (req, res, next) => {
+  const { username, name, password, storeId } = req.body ?? {};
+  const isText = (value, min, max) =>
+    typeof value === 'string' && value.trim().length >= min && value.trim().length <= max;
+  if (!isText(username, 1, 100) || !isText(name, 1, 200) || typeof password !== 'string' ||
+      password.length < 8 || password.length > 200 || !isText(storeId, 1, 100)) {
+    return res.status(400).json({ error: 'Invalid staff details (password needs 8+ characters).' });
+  }
+  try {
+    const id = randomUUID();
+    await pool.query(
+      'INSERT INTO staff (id, username, name, password_hash, store_id) VALUES (?, ?, ?, ?, ?)',
+      [id, username.trim().toLowerCase(), name.trim(), hashPassword(password), storeId],
+    );
+    res.status(201).json({ id, username: username.trim().toLowerCase(), name: name.trim(), storeId });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'Username already exists.' });
+    }
+    if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+      return res.status(404).json({ error: 'Store not found.' });
+    }
+    next(error);
+  }
+});
+
+async function loadStoreOrders(req, where, params) {
+  const [orders] = await pool.query(
+    `SELECT o.id, o.created_at, o.status, o.status_updated_at, s.name AS store_name
+     FROM orders o LEFT JOIN stores s ON s.id = o.store_id
+     WHERE o.store_id = ? ${where}
+     ORDER BY o.created_at DESC LIMIT 200`,
+    [req.staff.storeId, ...params],
+  );
+  if (orders.length === 0) return [];
+  const [rows] = await pool.query(
+    'SELECT order_id, product_id, name, unit, image_url, quantity FROM order_items WHERE order_id IN (?) ORDER BY id',
+    [orders.map((order) => order.id)],
+  );
+  const itemsByOrder = new Map();
+  for (const row of rows) {
+    const list = itemsByOrder.get(row.order_id) ?? [];
+    list.push({
+      productId: row.product_id,
+      name: row.name,
+      unit: row.unit,
+      imageUrl: publicUrl(req, row.image_url),
+      quantity: Number(row.quantity),
+    });
+    itemsByOrder.set(row.order_id, list);
+  }
+  return orders.map((order) => ({
+    id: order.id,
+    createdAt: order.created_at.toISOString(),
+    status: order.status,
+    statusUpdatedAt: (order.status_updated_at ?? order.created_at).toISOString(),
+    storeName: order.store_name,
+    items: itemsByOrder.get(order.id) ?? [],
+  }));
+}
+
+app.get('/staff/orders', staffAuth, async (req, res, next) => {
+  const { status, since } = req.query;
+  let where = '';
+  const params = [];
+  if (status !== undefined) {
+    if (typeof status !== 'string' || !status.split(',').every((s) => ORDER_STATUSES.includes(s))) {
+      return res.status(400).json({ error: 'Invalid status.' });
+    }
+    where += ' AND o.status IN (?)';
+    params.push(status.split(','));
+  }
+  if (since !== undefined) {
+    const date = new Date(since);
+    if (typeof since !== 'string' || Number.isNaN(date.getTime())) {
+      return res.status(400).json({ error: 'Invalid since date.' });
+    }
+    where += ' AND COALESCE(o.status_updated_at, o.created_at) > ?';
+    params.push(date);
+  }
+  try {
+    res.json(await loadStoreOrders(req, where, params));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/staff/orders/:id', staffAuth, async (req, res, next) => {
+  try {
+    const [order] = await loadStoreOrders(req, ' AND o.id = ?', [req.params.id]);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+    res.json(order);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/staff/orders/:id/status', staffAuth, async (req, res, next) => {
+  const status = req.body?.status;
+  if (!ORDER_STATUSES.includes(status)) {
+    return res.status(400).json({ error: 'Invalid status.' });
+  }
+  const db = await pool.getConnection();
+  try {
+    await db.beginTransaction();
+    const [rows] = await db.query(
+      'SELECT status FROM orders WHERE id = ? AND store_id = ? FOR UPDATE',
+      [req.params.id, req.staff.storeId],
+    );
+    if (rows.length === 0) throw new HttpError(404, 'Order not found.');
+    if (!STATUS_TRANSITIONS[rows[0].status].includes(status)) {
+      throw new HttpError(409, `Cannot change an order from ${rows[0].status} to ${status}.`);
+    }
+    await db.query('UPDATE orders SET status = ?, status_updated_at = ? WHERE id = ?', [
+      status,
+      new Date(),
+      req.params.id,
+    ]);
+    if (status === 'cancelled') {
+      await db.query(
+        `UPDATE store_stock ss JOIN order_items oi ON oi.product_id = ss.product_id
+         SET ss.stock_quantity = ss.stock_quantity + oi.quantity
+         WHERE oi.order_id = ? AND ss.store_id = ?`,
+        [req.params.id, req.staff.storeId],
+      );
+    }
+    await db.commit();
+    const [order] = await loadStoreOrders(req, ' AND o.id = ?', [req.params.id]);
+    res.json(order);
+  } catch (error) {
+    await db.rollback();
+    next(error);
+  } finally {
+    db.release();
+  }
+});
+
+app.get('/staff/products', staffAuth, async (req, res, next) => {
+  try {
+    const products = await listProducts(req.staff.storeId);
+    res.json(
+      products.map((p) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description,
+        unit: p.unit,
+        imageUrl: publicUrl(req, p.imageUrl),
+        stock: p.stock,
+      })),
+    );
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/staff/products/:productId/stock', staffAuth, async (req, res, next) => {
+  const stock = req.body?.stock;
+  if (!isStockValue(stock)) {
+    return res.status(400).json({ error: 'Stock must be a number of 0 or more.' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO store_stock (store_id, product_id, stock_quantity) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE stock_quantity = VALUES(stock_quantity)`,
+      [req.staff.storeId, req.params.productId, stock],
+    );
+    res.json({ productId: req.params.productId, stock });
+  } catch (error) {
+    if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+    next(error);
   }
 });
 
