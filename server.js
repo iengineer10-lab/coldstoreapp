@@ -956,6 +956,25 @@ app.post('/staff/login', async (req, res, next) => {
   }
 });
 
+app.get('/admin/api/staff', adminAuth, async (_req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT st.id, st.username, st.name, st.store_id, s.name AS store_name
+       FROM staff st JOIN stores s ON s.id = st.store_id
+       ORDER BY s.name, st.name, st.username`,
+    );
+    res.json(rows.map((row) => ({
+      id: row.id,
+      username: row.username,
+      name: row.name,
+      storeId: row.store_id,
+      storeName: row.store_name,
+    })));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/admin/api/staff', adminAuth, async (req, res, next) => {
   const { username, name, password, storeId } = req.body ?? {};
   const isText = (value, min, max) =>

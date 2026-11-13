@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ColdCart Admin - Inventory</title>
+  <title>ColdCart Admin</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
@@ -56,9 +56,27 @@
   <div class="brand">ColdCart Admin</div>
   <button type="button" class="active" data-section="products-section">Products</button>
   <button type="button" data-section="stores-section">Stores</button>
+  <button type="button" data-section="accounts-section">Staff accounts</button>
 </nav>
 <main>
   <div id="status"></div>
+  <section id="accounts-section" hidden>
+  <h1>Staff accounts</h1>
+  <p>Create an account for a staff member and assign it to their store. They can use these credentials to sign in to the staff app.</p>
+  <form id="staff-form">
+    <h2>Add staff account</h2>
+    <label>Name <input name="name" required maxlength="200" autocomplete="off"></label>
+    <label>Username <input name="username" required maxlength="100" autocomplete="off"></label>
+    <label>Password <input name="password" type="password" required minlength="8" maxlength="200" autocomplete="new-password"></label>
+    <label>Store <select name="storeId" required></select></label>
+    <div class="buttons"><button type="submit">Create account</button></div>
+  </form>
+  <p id="staff-empty" hidden>No staff accounts yet.</p>
+  <table>
+    <thead><tr><th>Name</th><th>Username</th><th>Store</th></tr></thead>
+    <tbody id="staff-rows"></tbody>
+  </table>
+  </section>
   <section id="stores-section" hidden>
   <h1>Stores</h1>
   <form id="store-form">
@@ -367,6 +385,23 @@
     }
     storeSelect.value = selectedStoreId ?? '';
 
+    const staffStoreSelect = staffForm.elements.storeId;
+    const previousStaffStore = staffStoreSelect.value;
+    staffStoreSelect.replaceChildren();
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = stores.length ? 'Select a store' : 'Add a store first';
+    staffStoreSelect.append(placeholder);
+    for (const store of stores) {
+      const option = document.createElement('option');
+      option.value = store.id;
+      option.textContent = store.name;
+      staffStoreSelect.append(option);
+    }
+    if (stores.some((store) => store.id === previousStaffStore)) {
+      staffStoreSelect.value = previousStaffStore;
+    }
+
     const located = stores.find((store) => store.latitude !== null);
     if (storeMap && !pinMarker && located) {
       storeMap.setView([located.latitude, located.longitude], 11);
@@ -501,6 +536,55 @@
     }
   });
 
+  const staffForm = document.getElementById('staff-form');
+  const staffRows = document.getElementById('staff-rows');
+  const staffEmpty = document.getElementById('staff-empty');
+
+  async function loadStaff() {
+    try {
+      const staff = await request('/admin/api/staff');
+      staffRows.replaceChildren();
+      staffEmpty.hidden = staff.length !== 0;
+      for (const account of staff) {
+        const tr = document.createElement('tr');
+        for (const value of [account.name, account.username, account.storeName]) {
+          const td = document.createElement('td');
+          td.textContent = value;
+          tr.append(td);
+        }
+        staffRows.append(tr);
+      }
+    } catch (error) {
+      show(error.message, true);
+    }
+  }
+
+  staffForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = staffForm.elements;
+    const button = staffForm.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      const account = await request('/admin/api/staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: data.name.value,
+          username: data.username.value,
+          password: data.password.value,
+          storeId: data.storeId.value,
+        }),
+      });
+      staffForm.reset();
+      show(`Account created for ${account.name}.`);
+      await loadStaff();
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   for (const navButton of document.querySelectorAll('nav button')) {
     navButton.addEventListener('click', () => {
       for (const other of document.querySelectorAll('nav button')) {
@@ -509,6 +593,7 @@
         document.getElementById(other.dataset.section).hidden = !active;
       }
       show('');
+      if (navButton.dataset.section === 'accounts-section') loadStaff();
       // Leaflet measures the container, which is zero-sized while its section is hidden.
       if (storeMap) storeMap.invalidateSize();
     });
