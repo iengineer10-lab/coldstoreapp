@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ColdCart Admin - Inventory</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f5f7f2; color: #14251f; margin: 0; }
+    .layout { display: flex; min-height: 100vh; }
+    nav { width: 200px; flex-shrink: 0; background: #14251f; padding: 20px 12px; }
+    nav .brand { color: #fff; font-weight: 800; font-size: 18px; margin: 0 6px 20px; }
+    nav button { display: block; width: 100%; text-align: left; background: transparent; padding: 12px 14px; margin-bottom: 4px; border-radius: 8px; font-size: 14px; }
+    nav button.active { background: #167c55; }
+    main { flex: 1; min-width: 0; max-width: 900px; margin: 0 auto; padding: 24px; }
+    @media (max-width: 640px) {
+      .layout { flex-direction: column; }
+      nav { width: auto; display: flex; gap: 8px; padding: 10px 12px; }
+      nav .brand { display: none; }
+      nav button { width: auto; margin: 0; }
+    }
+    h1 { margin: 24px 0 16px; }
+    table { margin-bottom: 16px; }
+    select { padding: 8px; margin-left: 8px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e6ebe4; }
+    th { background: #e6f1e9; font-size: 13px; }
+    td.name { display: flex; align-items: center; gap: 10px; }
+    img { width: 40px; height: 40px; object-fit: cover; border-radius: 8px; }
+    td input { width: 90px; padding: 6px; }
+    button { background: #167c55; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; }
+    button.secondary { background: #52645a; }
+    button.danger { background: #c0392b; }
+    button:disabled { opacity: .6; cursor: default; }
+    td.actions { white-space: nowrap; }
+    td.actions button { margin-right: 4px; }
+    form { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 16px; display: grid; gap: 10px; }
+    form h2 { margin: 0; font-size: 18px; }
+    form label { display: grid; gap: 4px; font-size: 13px; }
+    form input { padding: 8px; width: auto; }
+    form .buttons { display: flex; gap: 8px; }
+    .map-field { display: grid; gap: 4px; font-size: 13px; }
+    #store-map { height: 320px; border-radius: 8px; border: 1px solid #e6ebe4; cursor: crosshair; }
+    #pin-status.error { color: #c0392b; }
+    .low { color: #c0392b; font-weight: 700; }
+    #status { margin: 12px 0; min-height: 1.2em; }
+    #status.error { color: #c0392b; }
+  </style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <div class="brand">ColdCart Admin</div>
+  <button type="button" class="active" data-section="products-section">Products</button>
+  <button type="button" data-section="stores-section">Stores</button>
+</nav>
+<main>
+  <div id="status"></div>
+  <section id="stores-section" hidden>
+  <h1>Stores</h1>
+  <form id="store-form">
+    <h2 id="store-form-title">Add store</h2>
+    <label>Name <input name="name" required maxlength="200"></label>
+    <label>Name in Arabic (اختياري) <input name="nameAr" maxlength="200" dir="rtl" lang="ar"></label>
+    <label>Address <input name="address" maxlength="500"></label>
+    <label>Address in Arabic (اختياري) <input name="addressAr" maxlength="500" dir="rtl" lang="ar"></label>
+    <label>Phone <input name="phone" maxlength="50"></label>
+    <div class="map-field">
+      <span>Location (click the map or drag the pin to set the store location)</span>
+      <div id="store-map"></div>
+      <small id="pin-status">No pin set.</small>
+    </div>
+    <input name="latitude" type="hidden">
+    <input name="longitude" type="hidden">
+    <div class="buttons">
+      <button type="submit">Save store</button>
+      <button type="button" id="store-cancel" class="secondary" hidden>Cancel</button>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr><th>Store</th><th>Address</th><th>Phone</th><th>Location</th><th></th></tr>
+    </thead>
+    <tbody id="store-rows"></tbody>
+  </table>
+  </section>
+
+  <section id="products-section">
+  <h1>Products</h1>
+  <p><label>Showing stock for <select id="store-select"></select></label></p>
+  <form id="product-form">
+    <h2 id="form-title">Add product</h2>
+    <label>Name <input name="name" required maxlength="200"></label>
+    <label>Name in Arabic (اختياري) <input name="nameAr" maxlength="200" dir="rtl" lang="ar"></label>
+    <label>Description <input name="description" maxlength="500"></label>
+    <label>Description in Arabic (اختياري) <input name="descriptionAr" maxlength="500" dir="rtl" lang="ar"></label>
+    <label>Unit <input name="unit" required maxlength="50" placeholder="kg, bag"></label>
+    <label>Unit in Arabic (اختياري) <input name="unitAr" maxlength="50" dir="rtl" lang="ar" placeholder="كجم، كيس"></label>
+    <label>Image
+      <input type="file" id="image-file" accept="image/jpeg,image/png,image/webp">
+    </label>
+    <label>Image URL (filled automatically after upload) <input name="imageUrl" required maxlength="1000"></label>
+    <label>Search words, comma separated (English and Arabic) <input name="aliases" dir="auto" placeholder="chicken, chicken breast, دجاج، صدر دجاج"></label>
+    <div class="buttons">
+      <button type="submit">Save product</button>
+      <button type="button" id="cancel" class="secondary" hidden>Cancel</button>
+    </div>
+  </form>
+  <table>
+    <thead>
+      <tr><th>Product</th><th>Unit</th><th>In stock</th><th>Set stock</th><th></th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  </section>
+</main>
+</div>
+<script>
+  const LOW_STOCK = 10;
+  const rows = document.getElementById('rows');
+  const statusEl = document.getElementById('status');
+
+  function show(message, isError = false) {
+    statusEl.textContent = message;
+    statusEl.className = isError ? 'error' : '';
+  }
+
+  async function request(path, options) {
+    const response = await fetch(path, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error ?? `Request failed (${response.status})`);
+    }
+    return body;
+  }
+
+  function render(products) {
+    rows.replaceChildren();
+    for (const product of products) {
+      const tr = document.createElement('tr');
+
+      const nameCell = document.createElement('td');
+      nameCell.className = 'name';
+      const img = document.createElement('img');
+      img.src = product.imageUrl;
+      img.alt = '';
+      nameCell.append(img, product.nameAr ? `${product.name} · ${product.nameAr}` : product.name);
+
+      const unitCell = document.createElement('td');
+      unitCell.textContent = product.unit;
+
+      const stockCell = document.createElement('td');
+      stockCell.textContent = product.stock;
+      if (product.stock <= LOW_STOCK) stockCell.className = 'low';
+
+      const inputCell = document.createElement('td');
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '0';
+      input.step = 'any';
+      input.value = product.stock;
+      inputCell.append(input);
+
+      const actionCell = document.createElement('td');
+      actionCell.className = 'actions';
+      const button = document.createElement('button');
+      button.textContent = 'Save stock';
+      button.addEventListener('click', async () => {
+        const stock = Number(input.value);
+        if (!selectedStoreId) {
+          show('Add a store first.', true);
+          return;
+        }
+        if (input.value === '' || !Number.isFinite(stock) || stock < 0) {
+          show('Enter a stock of 0 or more.', true);
+          return;
+        }
+        button.disabled = true;
+        try {
+          await request(
+            `/admin/api/stores/${encodeURIComponent(selectedStoreId)}/products/${encodeURIComponent(product.id)}/stock`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ stock }),
+            },
+          );
+          show(`Updated ${product.name}.`);
+          await load();
+        } catch (error) {
+          show(error.message, true);
+          button.disabled = false;
+        }
+      });
+      const editButton = document.createElement('button');
+      editButton.textContent = 'Edit';
+      editButton.className = 'secondary';
+      editButton.addEventListener('click', () => startEdit(product));
+
+      const deleteButton = document.createElement('button');
+      deleteButton.textContent = 'Delete';
+      deleteButton.className = 'danger';
+      deleteButton.addEventListener('click', async () => {
+        if (!confirm(`Delete ${product.name}?`)) return;
+        try {
+          await request(`/admin/api/products/${encodeURIComponent(product.id)}`, {
+            method: 'DELETE',
+          });
+          if (editingId === product.id) resetForm();
+          show(`Deleted ${product.name}.`);
+          await load();
+        } catch (error) {
+          show(error.message, true);
+        }
+      });
+      actionCell.append(button, editButton, deleteButton);
+
+      tr.append(nameCell, unitCell, stockCell, inputCell, actionCell);
+      rows.append(tr);
+    }
+  }
+
+  async function load() {
+    try {
+      const query = selectedStoreId ? `?storeId=${encodeURIComponent(selectedStoreId)}` : '';
+      render(await request(`/admin/api/products${query}`));
+    } catch (error) {
+      show(error.message, true);
+    }
+  }
+
+  const storeSelect = document.getElementById('store-select');
+  const storeRows = document.getElementById('store-rows');
+  const storeForm = document.getElementById('store-form');
+  const storeFormTitle = document.getElementById('store-form-title');
+  const storeCancel = document.getElementById('store-cancel');
+  let selectedStoreId = null;
+  let editingStoreId = null;
+
+  const pinStatus = document.getElementById('pin-status');
+  const DEFAULT_MAP_CENTER = [26.15, 50.58];
+  let storeMap = null;
+  let pinMarker = null;
+
+  if (typeof L !== 'undefined') {
+    storeMap = L.map('store-map').setView(DEFAULT_MAP_CENTER, 11);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(storeMap);
+    storeMap.on('click', (event) => {
+      const { lat, lng } = event.latlng.wrap();
+      setPin(lat, lng);
+    });
+  } else {
+    pinStatus.textContent = 'The map could not be loaded. Check your internet connection and reload.';
+    pinStatus.classList.add('error');
+  }
+
+  function setPin(lat, lng, recenter = false) {
+    if (!storeMap) return;
+    const latitude = Math.round(lat * 1e6) / 1e6;
+    const longitude = Math.round(lng * 1e6) / 1e6;
+    storeForm.elements.latitude.value = latitude;
+    storeForm.elements.longitude.value = longitude;
+    pinStatus.textContent = `Pin set at ${latitude}, ${longitude}`;
+    pinStatus.classList.remove('error');
+    if (pinMarker) {
+      pinMarker.setLatLng([latitude, longitude]);
+    } else {
+      pinMarker = L.marker([latitude, longitude], { draggable: true }).addTo(storeMap);
+      pinMarker.on('dragend', () => {
+        const position = pinMarker.getLatLng().wrap();
+        setPin(position.lat, position.lng);
+      });
+    }
+    if (recenter) storeMap.setView([latitude, longitude], 15);
+  }
+
+  function clearPin() {
+    storeForm.elements.latitude.value = '';
+    storeForm.elements.longitude.value = '';
+    if (pinMarker) {
+      pinMarker.remove();
+      pinMarker = null;
+    }
+    if (storeMap) {
+      pinStatus.textContent = 'No pin set.';
+      pinStatus.classList.remove('error');
+    }
+  }
+
+  function resetStoreForm() {
+    editingStoreId = null;
+    storeForm.reset();
+    clearPin();
+    storeFormTitle.textContent = 'Add store';
+    storeCancel.hidden = true;
+  }
+
+  function startStoreEdit(store) {
+    editingStoreId = store.id;
+    storeForm.elements.name.value = store.name;
+    storeForm.elements.nameAr.value = store.nameAr;
+    storeForm.elements.address.value = store.address;
+    storeForm.elements.addressAr.value = store.addressAr;
+    storeForm.elements.phone.value = store.phone;
+    clearPin();
+    if (store.latitude !== null) setPin(store.latitude, store.longitude, true);
+    storeFormTitle.textContent = `Edit ${store.name}`;
+    storeCancel.hidden = false;
+    storeForm.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  function renderStores(stores) {
+    storeRows.replaceChildren();
+    for (const store of stores) {
+      const tr = document.createElement('tr');
+      const cells = [
+        store.nameAr ? `${store.name} · ${store.nameAr}` : store.name,
+        store.addressAr ? `${store.address} · ${store.addressAr}` : store.address,
+        store.phone,
+        store.latitude === null ? 'Not set' : `${store.latitude}, ${store.longitude}`,
+      ].map((text) => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        return td;
+      });
+
+      const actionCell = document.createElement('td');
+      actionCell.className = 'actions';
+      const editButton = document.createElement('button');
+      editButton.textContent = 'Edit';
+      editButton.className = 'secondary';
+      editButton.addEventListener('click', () => startStoreEdit(store));
+      const deleteButton = document.createElement('button');
+      deleteButton.textContent = 'Delete';
+      deleteButton.className = 'danger';
+      deleteButton.addEventListener('click', async () => {
+        if (!confirm(`Delete ${store.name} and all of its stock?`)) return;
+        try {
+          await request(`/admin/api/stores/${encodeURIComponent(store.id)}`, { method: 'DELETE' });
+          if (editingStoreId === store.id) resetStoreForm();
+          show(`Deleted ${store.name}.`);
+          await loadStores();
+        } catch (error) {
+          show(error.message, true);
+        }
+      });
+      actionCell.append(editButton, deleteButton);
+      tr.append(...cells, actionCell);
+      storeRows.append(tr);
+    }
+
+    storeSelect.replaceChildren();
+    for (const store of stores) {
+      const option = document.createElement('option');
+      option.value = store.id;
+      option.textContent = store.name;
+      storeSelect.append(option);
+    }
+    if (!stores.some((store) => store.id === selectedStoreId)) {
+      selectedStoreId = stores[0]?.id ?? null;
+    }
+    storeSelect.value = selectedStoreId ?? '';
+
+    const located = stores.find((store) => store.latitude !== null);
+    if (storeMap && !pinMarker && located) {
+      storeMap.setView([located.latitude, located.longitude], 11);
+    }
+  }
+
+  async function loadStores() {
+    try {
+      renderStores(await request('/admin/api/stores'));
+    } catch (error) {
+      show(error.message, true);
+    }
+    await load();
+  }
+
+  storeSelect.addEventListener('change', () => {
+    selectedStoreId = storeSelect.value || null;
+    load();
+  });
+
+  storeCancel.addEventListener('click', resetStoreForm);
+
+  storeForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = storeForm.elements;
+    if (data.latitude.value === '' || data.longitude.value === '') {
+      pinStatus.textContent = 'Set the store location by clicking on the map.';
+      pinStatus.classList.add('error');
+      document.getElementById('store-map').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    const coordinate = (field) => (field.value === '' ? null : Number(field.value));
+    const payload = {
+      name: data.name.value,
+      nameAr: data.nameAr.value,
+      address: data.address.value,
+      addressAr: data.addressAr.value,
+      phone: data.phone.value,
+      latitude: coordinate(data.latitude),
+      longitude: coordinate(data.longitude),
+    };
+    const path = editingStoreId
+      ? `/admin/api/stores/${encodeURIComponent(editingStoreId)}`
+      : '/admin/api/stores';
+    try {
+      const saved = await request(path, {
+        method: editingStoreId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      show(editingStoreId ? 'Store updated.' : 'Store added.');
+      if (!editingStoreId) selectedStoreId = saved.id;
+      resetStoreForm();
+      await loadStores();
+    } catch (error) {
+      show(error.message, true);
+    }
+  });
+
+  const form = document.getElementById('product-form');
+  const formTitle = document.getElementById('form-title');
+  const cancelButton = document.getElementById('cancel');
+  let editingId = null;
+
+  function resetForm() {
+    editingId = null;
+    form.reset();
+    formTitle.textContent = 'Add product';
+    cancelButton.hidden = true;
+  }
+
+  function startEdit(product) {
+    editingId = product.id;
+    form.elements.name.value = product.name;
+    form.elements.nameAr.value = product.nameAr;
+    form.elements.description.value = product.description;
+    form.elements.descriptionAr.value = product.descriptionAr;
+    form.elements.unit.value = product.unit;
+    form.elements.unitAr.value = product.unitAr;
+    form.elements.imageUrl.value = product.imageUrl;
+    form.elements.aliases.value = product.aliases.join(', ');
+    formTitle.textContent = `Edit ${product.name}`;
+    cancelButton.hidden = false;
+    form.scrollIntoView({ behavior: 'smooth' });
+  }
+
+  cancelButton.addEventListener('click', resetForm);
+
+  document.getElementById('image-file').addEventListener('change', async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      const { url } = await request('/admin/api/uploads', {
+        method: 'POST',
+        headers: { 'Content-Type': file.type },
+        body: file,
+      });
+      form.elements.imageUrl.value = url;
+      show('Image uploaded.');
+    } catch (error) {
+      show(error.message, true);
+    }
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = form.elements;
+    const payload = {
+      name: data.name.value,
+      nameAr: data.nameAr.value,
+      description: data.description.value,
+      descriptionAr: data.descriptionAr.value,
+      unit: data.unit.value,
+      unitAr: data.unitAr.value,
+      imageUrl: data.imageUrl.value,
+      aliases: data.aliases.value.split(/[,،]/).map((a) => a.trim()).filter(Boolean),
+    };
+    const path = editingId
+      ? `/admin/api/products/${encodeURIComponent(editingId)}`
+      : '/admin/api/products';
+    try {
+      await request(path, {
+        method: editingId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      show(editingId ? 'Product updated.' : 'Product added.');
+      resetForm();
+      await load();
+    } catch (error) {
+      show(error.message, true);
+    }
+  });
+
+  for (const navButton of document.querySelectorAll('nav button')) {
+    navButton.addEventListener('click', () => {
+      for (const other of document.querySelectorAll('nav button')) {
+        const active = other === navButton;
+        other.classList.toggle('active', active);
+        document.getElementById(other.dataset.section).hidden = !active;
+      }
+      show('');
+      // Leaflet measures the container, which is zero-sized while its section is hidden.
+      if (storeMap) storeMap.invalidateSize();
+    });
+  }
+
+  loadStores();
+</script>
+</body>
+</html>
